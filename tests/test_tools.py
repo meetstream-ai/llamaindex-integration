@@ -44,12 +44,17 @@ def test_dispatch_tool_never_exposes_provider_to_the_model(client):
 
 
 def test_get_meeting_tool(api_mock, client):
-    api_mock.get("/bots/bot_1/status").mock(return_value=httpx.Response(200, json={"bot_id": "bot_1", "status": "InMeeting"}))
+    api_mock.get("/bots/bot_1/detail").mock(
+        return_value=httpx.Response(200, json={"bot_details": {"BotID": "bot_1", "Status": "InMeeting"}})
+    )
     assert _tool("get_meeting", client).call(meeting_id="bot_1").raw_output["status"] == "InMeeting"
 
 
 def test_transcript_tool(api_mock, client):
-    api_mock.get("/bots/bot_1/get_transcript").mock(return_value=httpx.Response(200, json=[{"transcript": "Hi"}]))
+    api_mock.get("/bots/bot_1/detail").mock(
+        return_value=httpx.Response(200, json={"bot_details": {"BotID": "bot_1", "transcript_id": "tr_1"}})
+    )
+    api_mock.get("/transcript/tr_1/get_transcript").mock(return_value=httpx.Response(200, json=[{"transcript": "Hi"}]))
     assert _tool("get_meeting_transcript", client).call(meeting_id="bot_1").raw_output["segments"][0]["text"] == "Hi"
 
 
@@ -65,7 +70,7 @@ def test_meeting_action_tool_leave_meeting(api_mock, client):
 
 
 def test_tool_error_propagation(api_mock, client):
-    api_mock.get("/bots/missing/get_transcript").mock(return_value=httpx.Response(404, json={"message": "Bot not found"}))
+    api_mock.get("/bots/missing/detail").mock(return_value=httpx.Response(404, json={"message": "Bot not found"}))
     with pytest.raises(MeetStreamAPIError) as excinfo:
         _tool("get_meeting_transcript", client).call(meeting_id="missing")
     assert excinfo.value.code == "meeting_not_found"

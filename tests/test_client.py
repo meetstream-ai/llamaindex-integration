@@ -19,6 +19,11 @@ def _sent(api_mock) -> dict:
     return json.loads(api_mock.calls.last.request.content)
 
 
+def _detail(api_mock, bot: str = BOT, **fields):
+    details = {"BotID": bot, "Status": "Stopped", "transcript_id": "tr_1", **fields}
+    return api_mock.get(f"/bots/{bot}/detail").mock(return_value=httpx.Response(200, json={"bot_details": details}))
+
+
 def test_requires_api_key(monkeypatch):
     monkeypatch.delenv("MEETSTREAM_API_KEY", raising=False)
     with pytest.raises(ValueError):
@@ -78,20 +83,33 @@ def test_dispatch_bot_is_not_retried_and_maps_invalid_link(api_mock, client):
     assert route.call_count == 2  # one per call: create is never repeated
 
 
-def test_get_meeting_reports_url_and_platform_of_a_dispatched_bot(api_mock, client):
-    api_mock.post("/bots/create_bot").mock(
-        return_value=httpx.Response(201, json={"bot_id": BOT, "meeting_url": "https://us02web.zoom.us/j/1", "status": "Active"})
+def test_get_meeting_reads_bot_details(api_mock, client):
+    _detail(
+        api_mock,
+        Status="InMeeting",
+        Platform="Zoom",
+        MeetingLink="https://us02web.zoom.us/j/1",
+        StartTime="2026-03-19T13:57:52.810Z",
+        EndTime="2026-03-19T14:08:08Z",
+        custom_attributes={"team": "x"},
     )
-    api_mock.get(f"/bots/{BOT}/status").mock(
-        return_value=httpx.Response(200, json={"bot_id": BOT, "status": "InMeeting", "custom_attributes": {"team": "x"}})
-    )
-    client.dispatch_bot("https://us02web.zoom.us/j/1")
     meeting = client.get_meeting(BOT)
-    assert (meeting.status, meeting.platform, meeting.custom_attributes) == ("InMeeting", "zoom", {"team": "x"})
+    assert (meeting.status, meeting.platform, meeting.meeting_url, meeting.custom_attributes) == (
+        "InMeeting", "zoom", "https://us02web.zoom.us/j/1", {"team": "x"}
+    )
+    assert (meeting.started_at, meeting.ended_at, meeting.transcript_id, meeting.title) == (
+        "2026-03-19T13:57:52.810Z", "2026-03-19T14:08:08Z", "tr_1", None
+    )
+
+
+def test_get_meeting_maps_detail_platform_without_a_link(api_mock, client):
+    _detail(api_mock, Platform="GMeet")
+    assert client.get_meeting(BOT).platform == "google_meet"
 
 
 def test_get_transcript_segment_list_format(api_mock, client):
-    api_mock.get(f"/bots/{BOT}/get_transcript").mock(
+    _detail(api_mock)
+    api_mock.get("/transcript/tr_1/get_transcript").mock(
         return_value=httpx.Response(200, json=[
             {"speaker": "Alex", "transcript": "Hello there.", "start_time": 1.0, "end_time": 2.0, "words": []},
             {"speaker": 1, "transcript": "Hi.", "start_time": 2.5, "end_time": 3.0},
@@ -100,6 +118,29 @@ def test_get_transcript_segment_list_format(api_mock, client):
     transcript = client.get_transcript(BOT)
     assert transcript.meeting_id == BOT
     assert [(s.speaker, s.text, s.start_time) for s in transcript.segments] == [("Alex", "Hello there.", 1.0), ("Speaker 2", "Hi.", 2.5)]
+
+
+def test_get_transcript_uses_the_transcript_id_from_create_bot(api_mock, client):
+    api_mock.post("/bots/create_bot").mock(return_value=httpx.Response(201, json={"bot_id": BOT, "transcript_id": "tr_9"}))
+    detail = _detail(api_mock)
+    api_mock.get("/transcript/tr_9/get_transcript").mock(return_value=httpx.Response(200, json=[{"transcript": "Hi"}]))
+    client.dispatch_bot("https://meet.google.com/abc-defg-hij")
+    assert client.get_transcript(BOT).segments[0].text == "Hi"
+    assert not detail.called
+
+
+def test_get_transcript_without_a_transcript_id(api_mock, client):
+    _detail(api_mock, transcript_id=None)
+    with pytest.raises(MeetStreamAPIError) as excinfo:
+        client.get_transcript(BOT)
+    assert excinfo.value.code == "transcript_unavailable"
+
+
+def test_get_transcript_for_an_unknown_bot(api_mock, client):
+    api_mock.get(f"/bots/{BOT}/detail").mock(return_value=httpx.Response(404, json={"message": "Bot not found"}))
+    with pytest.raises(MeetStreamAPIError) as excinfo:
+        client.get_transcript(BOT)
+    assert excinfo.value.code == "meeting_not_found"
 
 
 def test_get_transcript_participant_keyed_format():
@@ -124,22 +165,23 @@ def test_unrecognised_transcript_body():
      (404, "meeting_not_found"), (403, "forbidden"), (401, "authentication_failed")],
 )
 def test_transcript_status_codes(api_mock, client, status, code):
-    api_mock.get(f"/bots/{BOT}/get_transcript").mock(return_value=httpx.Response(status, json={"message": "m"}))
+    _detail(api_mock)
+    api_mock.get("/transcript/tr_1/get_transcript").mock(return_value=httpx.Response(status, json={"message": "m"}))
     with pytest.raises(MeetStreamAPIError) as excinfo:
         client.get_transcript(BOT)
     assert (excinfo.value.code, excinfo.value.status_code) == (code, status)
 
 
 def test_transient_5xx_is_retried_for_reads(api_mock, client):
-    route = api_mock.get(f"/bots/{BOT}/status").mock(
-        side_effect=[httpx.Response(503), httpx.Response(200, json={"bot_id": BOT, "status": "Stopped"})]
+    route = api_mock.get(f"/bots/{BOT}/detail").mock(
+        side_effect=[httpx.Response(503), httpx.Response(200, json={"bot_details": {"BotID": BOT, "Status": "Stopped"}})]
     )
     assert client.get_meeting(BOT).status == "Stopped"
     assert route.call_count == 2
 
 
 def test_persistent_5xx_raises_upstream_error(api_mock, client):
-    api_mock.get(f"/bots/{BOT}/status").mock(return_value=httpx.Response(500))
+    api_mock.get(f"/bots/{BOT}/detail").mock(return_value=httpx.Response(500))
     with pytest.raises(MeetStreamAPIError) as excinfo:
         client.get_meeting(BOT)
     assert excinfo.value.code == "upstream_error"
@@ -168,8 +210,8 @@ def test_create_bot_without_bot_id_is_an_error(api_mock, client):
 
 
 def test_bot_ids_are_url_encoded(api_mock, client):
-    route = api_mock.get("/bots/abc%2Fremove_bot%23/status").mock(
-        return_value=httpx.Response(200, json={"bot_id": "x", "status": "Stopped"})
+    route = api_mock.get("/bots/abc%2Fremove_bot%23/detail").mock(
+        return_value=httpx.Response(200, json={"bot_details": {"BotID": "x", "Status": "Stopped"}})
     )
     removed = api_mock.get("/bots/abc/remove_bot").mock(return_value=httpx.Response(200, json={}))
     client.get_meeting("abc/remove_bot#")
@@ -177,7 +219,8 @@ def test_bot_ids_are_url_encoded(api_mock, client):
 
 
 def test_non_json_transcript_body_is_a_format_error(api_mock, client):
-    api_mock.get(f"/bots/{BOT}/get_transcript").mock(return_value=httpx.Response(200, text="<html>oops</html>"))
+    _detail(api_mock)
+    api_mock.get("/transcript/tr_1/get_transcript").mock(return_value=httpx.Response(200, text="<html>oops</html>"))
     with pytest.raises(MeetStreamAPIError) as excinfo:
         client.get_transcript(BOT)
     assert excinfo.value.code == "transcript_format_error"

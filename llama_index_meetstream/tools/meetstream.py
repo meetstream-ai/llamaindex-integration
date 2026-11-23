@@ -67,8 +67,7 @@ def get_meeting_tool(client: MeetStreamClient) -> FunctionTool:
         Use this when you need to check whether a bot has actually joined a
         meeting yet, what its current status is, or to confirm a meeting_id
         is valid before calling get_meeting_transcript or a meeting-action tool.
-        Several returned fields (title, started_at, ended_at) are commonly
-        None -- MeetStream's status endpoint does not expose them.
+        title is always None: MeetStream has no meeting title.
 
         Args:
             meeting_id (str): The meeting id returned by dispatch_meetstream_bot.

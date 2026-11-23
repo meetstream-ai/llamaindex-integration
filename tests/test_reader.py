@@ -13,13 +13,13 @@ from .conftest import API_URL
 
 
 def _mock_transcript(api_mock, body, meeting_id: str = "bot_1", status: int = 200):
-    api_mock.get(f"/bots/{meeting_id}/get_transcript").mock(return_value=httpx.Response(status, json=body))
+    _mock_status(api_mock, meeting_id)
+    api_mock.get(f"/transcript/tr_{meeting_id}/get_transcript").mock(return_value=httpx.Response(status, json=body))
 
 
 def _mock_status(api_mock, meeting_id: str = "bot_1"):
-    api_mock.get(f"/bots/{meeting_id}/status").mock(
-        return_value=httpx.Response(200, json={"bot_id": meeting_id, "status": "Stopped", "custom_attributes": {}})
-    )
+    details = {"BotID": meeting_id, "Status": "Stopped", "custom_attributes": {}, "transcript_id": f"tr_{meeting_id}"}
+    api_mock.get(f"/bots/{meeting_id}/detail").mock(return_value=httpx.Response(200, json={"bot_details": details}))
 
 
 def test_reader_returns_one_document_per_segment(api_mock, client):
@@ -75,8 +75,11 @@ def test_reader_handles_missing_speaker_and_timestamps(api_mock, client):
 
 
 def test_reader_metadata_fetch_failure_does_not_fail_the_load(api_mock, client):
-    _mock_transcript(api_mock, [{"transcript": "Hello."}])
-    api_mock.get("/bots/bot_1/status").mock(return_value=httpx.Response(404, json={"message": "not found"}))
+    # The transcript id is known from create_bot, so only the metadata lookup fails.
+    api_mock.post("/bots/create_bot").mock(return_value=httpx.Response(201, json={"bot_id": "bot_1", "transcript_id": "tr_bot_1"}))
+    client.dispatch_bot("https://meet.google.com/abc-defg-hij")
+    api_mock.get("/transcript/tr_bot_1/get_transcript").mock(return_value=httpx.Response(200, json=[{"transcript": "Hello."}]))
+    api_mock.get("/bots/bot_1/detail").mock(return_value=httpx.Response(404, json={"message": "not found"}))
 
     docs = MeetStreamReader(meeting_id="bot_1", client=client).load_data()
 

@@ -10,8 +10,8 @@ Endpoints used (see https://docs.meetstream.ai/api-reference):
 | Method                     | MeetStream call                       |
 |----------------------------|---------------------------------------|
 | `dispatch_bot`             | `POST /bots/create_bot`               |
-| `get_meeting`              | `GET /bots/{bot_id}/status`           |
-| `get_transcript`           | `GET /bots/{bot_id}/get_transcript`   |
+| `get_meeting`              | `GET /bots/{bot_id}/detail`           |
+| `get_transcript`           | `GET /transcript/{transcript_id}/get_transcript` |
 | `send_chat_message`        | `POST /bots/{bot_id}/send_message`    |
 | `send_image`               | `POST /bots/{bot_id}/send_image`      |
 | `leave_meeting`            | `GET /bots/{bot_id}/remove_bot`       |
@@ -71,13 +71,23 @@ _PLATFORM_HOSTS = {
     "teams.live.com": "teams",
 }
 
+# `bot_details.Platform` values from `GET /bots/{bot_id}/detail`, mapped to this package's names.
+_DETAIL_PLATFORMS = {
+    "gmeet": "google_meet",
+    "google_meet": "google_meet",
+    "zoom": "zoom",
+    "teams": "teams",
+    "msteams": "teams",
+    "microsoft_teams": "teams",
+}
+
 
 class MeetingMetadata(BaseModel):
     """A meeting's current state. `meeting_id` is MeetStream's `bot_id`.
 
-    MeetStream's status endpoint returns only `status` and `custom_attributes`.
-    `meeting_url` and `platform` are filled in when this client dispatched the bot
-    itself; `title`, `started_at` and `ended_at` are not available from it and stay `None`.
+    Filled from `GET /bots/{bot_id}/detail`: `status`, `platform`, `meeting_url`,
+    `started_at`, `ended_at`, `custom_attributes` and `transcript_id`. MeetStream has no
+    meeting title, so `title` stays `None`.
     """
 
     meeting_id: str
@@ -88,6 +98,7 @@ class MeetingMetadata(BaseModel):
     started_at: str | None = None
     ended_at: str | None = None
     custom_attributes: dict[str, Any] | None = None
+    transcript_id: str | None = None
 
 
 class TranscriptSegment(BaseModel):
@@ -124,6 +135,12 @@ def _bot_path(bot_id: str, endpoint: str) -> str:
     turning a read into a different MeetStream call.
     """
     return f"/bots/{quote(str(bot_id), safe='')}/{endpoint}"
+
+
+def _detail_platform(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    return _DETAIL_PLATFORMS.get(value.lower().replace(" ", "_"), value)
 
 
 def infer_platform(meeting_url: str | None) -> str | None:
@@ -197,6 +214,8 @@ class MeetStreamClient:
         self.transcription_options = transcription_options
         # Meeting URLs of bots this client dispatched, so get_meeting can report them.
         self._meeting_urls: dict[str, str] = {}
+        # Transcript ids returned by create_bot or /detail, so get_transcript can skip a lookup.
+        self._transcript_ids: dict[str, str] = {}
         # MeetStream's REST API wants the literal word "Token", not "Bearer".
         self._http = httpx.Client(
             base_url=resolved_base_url.rstrip("/"),
@@ -328,36 +347,58 @@ class MeetStreamClient:
                 "MeetStream accepted create_bot but returned no bot_id", code="upstream_error", status_code=response.status_code
             )
         self._meeting_urls[bot_id] = raw.get("meeting_url") or meeting_url
+        if raw.get("transcript_id"):
+            self._transcript_ids[bot_id] = raw["transcript_id"]
         return BotDispatchResult(
             bot_id=bot_id, meeting_id=bot_id, status=raw.get("status") or "unknown", transcript_id=raw.get("transcript_id")
         )
 
     def get_meeting(self, meeting_id: str) -> MeetingMetadata:
-        """The bot's current status (`GET /bots/{bot_id}/status`)."""
-        response = self._request("GET", _bot_path(meeting_id, "status"))
+        """The bot's status and meeting metadata (`GET /bots/{bot_id}/detail`)."""
+        response = self._request("GET", _bot_path(meeting_id, "detail"))
         self._raise_for_status(response, what=f"meeting {meeting_id}")
         raw = self._json(response) or {}
-        meeting_url = self._meeting_urls.get(meeting_id)
+        details = raw.get("bot_details") if isinstance(raw, dict) else None
+        if not isinstance(details, dict):
+            details = {}
+        meeting_url = details.get("MeetingLink") or self._meeting_urls.get(meeting_id)
+        transcript_id = details.get("transcript_id") or self._transcript_ids.get(meeting_id)
+        if transcript_id:
+            self._transcript_ids[meeting_id] = transcript_id
         return MeetingMetadata(
             meeting_id=meeting_id,
-            status=raw.get("status") or "unknown",
-            platform=infer_platform(meeting_url),
+            status=details.get("Status") or "unknown",
+            platform=infer_platform(meeting_url) or _detail_platform(details.get("Platform")),
             meeting_url=meeting_url,
-            custom_attributes=raw.get("custom_attributes") or None,
+            started_at=details.get("StartTime") or None,
+            ended_at=details.get("EndTime") or None,
+            custom_attributes=details.get("custom_attributes") or None,
+            transcript_id=transcript_id,
         )
 
     # ------------------------------------------------------------------ transcripts
 
     def get_transcript(self, meeting_id: str) -> Transcript:
-        """The post-call transcript (`GET /bots/{bot_id}/get_transcript`).
+        """The post-call transcript (`GET /transcript/{transcript_id}/get_transcript`).
+
+        The transcript id comes from `create_bot` when this client dispatched the bot,
+        else from `GET /bots/{bot_id}/detail`.
 
         Raises `MeetStreamAPIError` with `code`:
           - `"transcript_not_ready"` (HTTP 202): still processing; try again later.
-          - `"transcript_unavailable"`: transcription wasn't enabled, the bot was never
-            admitted (409), or processing failed (422). Retrying won't help.
+          - `"transcript_unavailable"`: the bot has no transcript id (transcription wasn't
+            enabled), the bot was never admitted (409), or processing failed (422).
+            Retrying won't help.
           - `"meeting_not_found"` (404): no such bot, or no transcript exists for it.
         """
-        response = self._request("GET", _bot_path(meeting_id, "get_transcript"))
+        transcript_id = self._transcript_ids.get(meeting_id) or self.get_meeting(meeting_id).transcript_id
+        if not transcript_id:
+            raise MeetStreamAPIError(
+                f"MeetStream has no transcript for {meeting_id}; transcription was not enabled for this bot",
+                code="transcript_unavailable",
+                status_code=409,
+            )
+        response = self._request("GET", f"/transcript/{quote(str(transcript_id), safe='')}/get_transcript")
         if response.status_code == 202:
             raise MeetStreamAPIError(
                 self._message(response, f"Transcript for {meeting_id} is still processing"),

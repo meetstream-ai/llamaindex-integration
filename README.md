@@ -18,6 +18,9 @@ Your LlamaIndex app ──► llama-index-meetstream ──► MeetStream REST A
 
 The package calls MeetStream's REST API directly with your API key. There is no server to run.
 
+Zoom bots join through your own Zoom app (OBF/ZAK tokens), so set that up before you send
+bots to Zoom meetings: see MeetStream's [Zoom guide](https://docs.meetstream.ai/guides/platforms/zoom).
+
 ## Install
 
 ```bash
@@ -88,8 +91,8 @@ Each `Document` carries:
 |---|---|---|
 | `source` | `str` | Always `"meetstream"`. |
 | `meeting_id` | `str` | MeetStream's `bot_id`. |
-| `meeting_title` | `str \| None` | MeetStream's status endpoint doesn't return a title, so this is `None`. |
-| `platform` | `str \| None` | `"google_meet"` / `"zoom"` / `"teams"`, when the same client dispatched the bot. |
+| `meeting_title` | `str \| None` | MeetStream has no meeting title, so this is `None`. |
+| `platform` | `str \| None` | `"google_meet"` / `"zoom"` / `"teams"`, from the bot's details. |
 | `speaker` | `str \| None` | `None` if the provider didn't identify the speaker. |
 | `start_time` / `end_time` | `float \| None` | Seconds from the start of the recording. |
 
@@ -135,9 +138,7 @@ Tests mock MeetStream at the HTTP layer with `respx`; no network or key is neede
 
 ## Known limitations
 
-- **No meeting title or start/end times.** MeetStream's status endpoint returns only the
-  bot's status and custom attributes.
-- **`platform` and `meeting_url` are known only to the client that dispatched the bot.** A
-  fresh client looking up an existing bot gets `None` for both.
+- **No meeting title.** `get_meeting` reads `GET /bots/{bot_id}/detail`, which gives the
+  status, platform, meeting link, start and end times and custom attributes, but no title.
 - **No webhooks.** Poll `get_meeting_transcript` (or `reader.load_data()`) until it stops
   raising `transcript_not_ready`.

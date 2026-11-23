@@ -29,8 +29,8 @@ All from MeetStream's [API reference](https://docs.meetstream.ai/api-reference).
 | Client method | Endpoint | Notes |
 |---|---|---|
 | `dispatch_bot` | `POST /bots/create_bot` | Sends `meeting_link`, `bot_name` and `recording_config.transcript.provider`. Not retried, so a lost response can't put two bots in a meeting. |
-| `get_meeting` | `GET /bots/{bot_id}/status` | Returns `status` and `custom_attributes`. |
-| `get_transcript` | `GET /bots/{bot_id}/get_transcript` | Resolves the bot's transcript for us. 202 = still processing, 409 = transcription not enabled or bot not admitted, 422 = processing failed. |
+| `get_meeting` | `GET /bots/{bot_id}/detail` | `bot_details`: `Status`, `Platform`, `MeetingLink`, `StartTime`, `EndTime`, `custom_attributes`, `transcript_id`. |
+| `get_transcript` | `GET /transcript/{transcript_id}/get_transcript` | The `transcript_id` comes from `create_bot` or `bot_details.transcript_id`. 202 = still processing, 409 = transcription not enabled or bot not admitted, 422 = processing failed. |
 | `send_chat_message` | `POST /bots/{bot_id}/send_message` | `{"message"}`, 1–2000 characters. |
 | `send_image` | `POST /bots/{bot_id}/send_image` | `{"img_url", "display_duration"}`. |
 | `leave_meeting` | `GET /bots/{bot_id}/remove_bot` | GET, not DELETE. 202 while stopping, 200 once stopped. |
@@ -82,6 +82,5 @@ rather than LlamaIndex's release cycle. It depends only on `llama-index-core`, `
 
 ## Limitations
 
-- MeetStream's status endpoint doesn't return a meeting title or start/end times.
-- `platform`/`meeting_url` are remembered only for bots the same client dispatched.
+- MeetStream has no meeting title, so `title` is always `None`.
 - No webhook handling. Callers poll until the transcript is ready.
